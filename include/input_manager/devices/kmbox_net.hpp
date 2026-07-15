@@ -83,12 +83,16 @@ public:
     // monitor physical input (port > 0 = enable, 0 = disable)
     void monitor(int port);
 
-    // query physical button state
+    // query physical mouse button state
     bool isdown_left();
     bool isdown_right();
     bool isdown_middle();
     bool isdown_side1();
     bool isdown_side2();
+
+    // query physical keyboard key state (USB HID code)
+    bool isdown_key(uint8_t hid_code);
+    bool isdown_key(KeyCode key);
 
     // encrypted variants — always use AES regardless of global toggle
     void enc_move(int32_t x, int32_t y);

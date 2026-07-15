@@ -306,6 +306,16 @@ bool KMBoxB::isdown_side2() {
     return resp == "1" || resp == "true";
 }
 
+bool KMBoxB::isdown_key(uint8_t hid_code) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto resp = send_command("km.isdown(" + std::to_string(hid_code) + ")");
+    return resp == "1" || resp == "true";
+}
+
+bool KMBoxB::isdown_key(KeyCode key) {
+    return isdown_key(static_cast<uint8_t>(key));
+}
+
 void KMBoxB::set_baud(uint32_t baud) {
     std::lock_guard<std::mutex> lock(mutex_);
     send_command("km.baud(" + std::to_string(baud) + ")");

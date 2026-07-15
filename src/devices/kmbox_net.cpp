@@ -646,6 +646,18 @@ bool KMBoxNet::isdown_side2() {
     return resp.size() >= 4 && read_u32_le(resp.data()) != 0;
 }
 
+bool KMBoxNet::isdown_key(uint8_t hid_code) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_u32_le(data, 0x100 | hid_code);
+    auto resp = send_and_receive(NET_CMD_ISDOWN, data);
+    return resp.size() >= 4 && read_u32_le(resp.data()) != 0;
+}
+
+bool KMBoxNet::isdown_key(KeyCode key) {
+    return isdown_key(static_cast<uint8_t>(key));
+}
+
 // ---------------------------------------------------------------------------
 // encrypted variants — force AES regardless of global toggle
 // ---------------------------------------------------------------------------
