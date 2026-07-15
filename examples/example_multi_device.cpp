@@ -34,7 +34,7 @@ int main() {
         net.set_encryption(true);
 
         auto& makcu = mgr.get_as<im::Makcu>("makcu");
-        makcu.set_dpi(1600);
+        makcu.turbo(im::MakcuButton::Left, 200);
 
         // move all mice simultaneously
         mgr.mouse_move_all(10, 0);

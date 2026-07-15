@@ -8,7 +8,7 @@ SDK C++ unifié pour contrôler des périphériques d'entrée matériels : **KMB
 |-----------|-----------|-----------|-------------|
 | KMBox B | USB Serial | Binaire `[0x57][0xAB][cmd][len][data][sum]` | 115200 |
 | KMBox Net | UDP | Binaire `[MAGIC][cmd][rand][len][data]` + AES-128-ECB | IP:16820 |
-| Makcu | USB Serial | Binaire `[0xFA][cmd][len][data][xor]` | 128000 |
+| Makcu | CH343 USB Serial | ASCII `km.<cmd>(<args>)\r\n` | 115200 (jusqu'à 4 Mbps) |
 
 ## Build
 
@@ -20,12 +20,11 @@ make -j$(nproc)
 
 ## API rapide
 
-### Un seul appareil
+### KMBox B (série, binaire)
 
 ```cpp
 #include <input_manager/input_manager.hpp>
 
-// KMBox B (série)
 im::KMBoxB device("COM3");
 device.connect();
 device.mouse_move(100, 50);
@@ -33,20 +32,53 @@ device.mouse_click();
 device.key_tap(im::KeyCode::A);
 device.type_string("Hello!");
 device.disconnect();
+```
 
-// KMBox Net (réseau)
+### KMBox Net (UDP, chiffré)
+
+```cpp
 im::KMBoxNet net("192.168.1.100", 16820, "uuid");
 net.set_encryption(true);
 net.connect();
 net.mouse_move_absolute(960, 540);
 net.mouse_move_smooth(200, 100, 500);
 net.disconnect();
+```
 
-// Makcu (série)
-im::Makcu makcu("/dev/ttyUSB0", 128000);
+### Makcu (série, ASCII — protocole km.*)
+
+```cpp
+im::Makcu makcu("/dev/ttyUSB0"); // VID:PID 1A86:55D3
 makcu.connect();
-makcu.set_dpi(800);
-makcu.mouse_move(50, -30);
+
+// firmware & info
+std::cout << makcu.firmware_version() << "\n";
+auto info = makcu.device_info_full(); // MAC, CPU, TEMP, RAM...
+
+// mouse
+makcu.mouse_move(100, -50);
+makcu.click(im::MakcuButton::Left, 2, 50); // double-click, 50ms delay
+makcu.silent_move(30, 20);  // left-down -> move -> left-up
+makcu.mouse_scroll(-3);
+
+// turbo mode
+makcu.turbo(im::MakcuButton::Left, 100); // rapid-fire 100ms
+makcu.turbo_disable_all();
+
+// lock/unlock axes & buttons
+makcu.lock(im::MakcuLockTarget::MX);
+makcu.unlock(im::MakcuLockTarget::MX);
+
+// keyboard
+makcu.type_string("Hello!");           // km.type() with auto-shift
+makcu.key_press_name("enter");         // by name
+makcu.key_down("lctrl");              // modifier down
+makcu.key_press_name("s");            // Ctrl+S
+makcu.key_up("lctrl");
+
+// streaming mouse data
+makcu.stream_set(im::MakcuStreamMode::Raw, 100);
+
 makcu.disconnect();
 ```
 
@@ -70,7 +102,7 @@ mgr["kb"].type_string("Hello");
 
 // accès typé pour fonctions spécifiques
 mgr.get_as<im::KMBoxNet>("net").set_encryption(true);
-mgr.get_as<im::Makcu>("makcu").set_dpi(1600);
+mgr.get_as<im::Makcu>("makcu").turbo(im::MakcuButton::Left, 100);
 
 // opérations groupées
 mgr.mouse_move_all(10, 0);
@@ -95,20 +127,33 @@ mouse_double_click(button)
 mouse_scroll(delta)
 ```
 
-### Fonctions spécifiques
+### Fonctions spécifiques par appareil
 
 | KMBox B | KMBox Net | Makcu |
 |---------|-----------|-------|
-| `set_mouse_mask(x, y)` | `set_encryption(bool)` | `set_dpi(dpi)` |
-| | `set_monitor_resolution(w, h)` | `set_poll_rate(hz)` |
-| | `monitor_capture()` | |
+| `set_mouse_mask(x, y)` | `set_encryption(bool)` | `click(btn, count, delay_ms)` |
+| | `set_monitor_resolution(w, h)` | `silent_move(dx, dy)` |
+| | `monitor_capture()` | `turbo(btn, delay_ms)` / `turbo_disable_all()` |
+| | | `lock(target)` / `unlock(target)` / `lock_state(target)` |
+| | | `stream_set(mode, period_ms)` / `stream_mode()` |
+| | | `echo(bool)` |
+| | | `serial_number()` / `set_serial(s)` |
+| | | `device_info_full()` → MAC, CPU, TEMP, RAM... |
+| | | `firmware_version()` |
+| | | `key_down(name)` / `key_up(name)` / `key_press_name(name)` |
 
 ## Types
 
 ```cpp
+// Commun
 im::MouseButton::Left | Right | Middle | Side1 | Side2
 im::KeyModifier::LeftCtrl | LeftShift | LeftAlt | LeftGui | Right...
 im::KeyCode::A..Z | Num0..9 | F1..F12 | Enter | Space | ...
+
+// Makcu spécifique
+im::MakcuButton::Left | Right | Middle | Mouse4 | Mouse5
+im::MakcuLockTarget::MX | MY | MW | ML | MM | MR | MS1 | MS2
+im::MakcuStreamMode::Off | Raw | Mut
 ```
 
 ## Structure du projet
@@ -124,9 +169,9 @@ include/input_manager/
 │   ├── serial_port.hpp        ← communication série cross-platform
 │   └── udp_client.hpp         ← client UDP cross-platform
 └── devices/
-    ├── kmbox_b.hpp
-    ├── kmbox_net.hpp
-    └── makcu.hpp
+    ├── kmbox_b.hpp            ← KMBox B (série, binaire)
+    ├── kmbox_net.hpp          ← KMBox Net (UDP, AES-128-ECB)
+    └── makcu.hpp              ← Makcu (série ASCII, protocole km.*)
 ```
 
 ## Dépendances

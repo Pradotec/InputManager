@@ -4,36 +4,57 @@
 
 int main() {
     try {
+        // CH343 USB-serial, default 115200 baud (VID:PID 1A86:55D3)
         im::Makcu device("COM5"); // Linux: "/dev/ttyUSB0"
         device.connect();
 
-        auto info = device.get_info();
-        std::cout << "Connected to " << info.device_type
-                  << " (firmware " << info.firmware_version << ")\n";
+        // firmware version
+        std::cout << "Firmware: " << device.firmware_version() << "\n";
 
-        // configure device
-        device.set_dpi(800);
-        device.set_poll_rate(1000);
+        // full device info
+        auto info = device.device_info_full();
+        std::cout << "Model: " << info.model << "\n"
+                  << "MAC: "   << info.mac   << "\n"
+                  << "CPU: "   << info.cpu   << "\n";
 
-        // move mouse
+        // -- mouse --
         device.mouse_move(150, -75);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        // smooth movement
-        device.mouse_move_smooth(200, 100, 800);
-        std::this_thread::sleep_for(std::chrono::milliseconds(900));
+        // native click with count and delay
+        device.click(im::MakcuButton::Left, 2, 50);
 
-        // double click
-        device.mouse_double_click(im::MouseButton::Left);
+        // scroll
+        device.mouse_scroll(-3);
 
-        // scroll down
-        device.mouse_scroll(-5);
+        // silent move (left-down -> move -> left-up)
+        device.silent_move(50, 30);
 
-        // type text
-        device.type_string("Makcu works!", 20);
+        // -- turbo mode --
+        device.turbo(im::MakcuButton::Left, 100); // 100ms interval
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        device.turbo_disable_all();
 
-        // key combo: Ctrl+C
-        device.key_tap(im::KeyCode::C, im::KeyModifier::LeftCtrl);
+        // -- lock/unlock axes --
+        device.lock(im::MakcuLockTarget::MX);
+        std::cout << "MX locked: " << device.lock_state(im::MakcuLockTarget::MX) << "\n";
+        device.unlock(im::MakcuLockTarget::MX);
+
+        // -- keyboard --
+        device.type_string("Hello from Makcu!");
+
+        // key by name
+        device.key_press_name("enter");
+
+        // key combo: Ctrl+S using names
+        device.key_down("lctrl");
+        device.key_press_name("s");
+        device.key_up("lctrl");
+
+        // -- streaming mouse data --
+        device.stream_set(im::MakcuStreamMode::Raw, 100);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        device.stream_set(im::MakcuStreamMode::Off);
 
         device.disconnect();
         std::cout << "Done.\n";

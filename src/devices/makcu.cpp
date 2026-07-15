@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <sstream>
 #include <thread>
 
 namespace im {
@@ -12,21 +13,11 @@ namespace im {
 // helpers
 // ---------------------------------------------------------------------------
 
-static void push_i16(std::vector<uint8_t>& v, int16_t val) {
-    v.push_back(static_cast<uint8_t>(val & 0xFF));
-    v.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
-}
-
-static void push_u16(std::vector<uint8_t>& v, uint16_t val) {
-    v.push_back(static_cast<uint8_t>(val & 0xFF));
-    v.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
-}
-
-static void push_i32_le(std::vector<uint8_t>& v, int32_t val) {
-    v.push_back(static_cast<uint8_t>( val        & 0xFF));
-    v.push_back(static_cast<uint8_t>((val >>  8) & 0xFF));
-    v.push_back(static_cast<uint8_t>((val >> 16) & 0xFF));
-    v.push_back(static_cast<uint8_t>((val >> 24) & 0xFF));
+static std::string trim(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -46,9 +37,10 @@ void Makcu::connect() {
     std::lock_guard<std::mutex> lock(mutex_);
     serial_.open(port_name_, baud_rate_);
     connected_ = true;
-    std::memset(current_keys_, 0, sizeof(current_keys_));
-    current_buttons_ = 0;
-    current_modifier_ = 0;
+
+    // flush any pending data
+    uint8_t junk[256];
+    serial_.read(junk, sizeof(junk), 100);
 }
 
 void Makcu::disconnect() {
@@ -62,45 +54,76 @@ void Makcu::disconnect() {
 bool Makcu::is_connected() const { return connected_; }
 
 // ---------------------------------------------------------------------------
-// protocol — packet format: [0xFA] [cmd] [len] [data...] [xor_checksum]
+// protocol — ASCII commands: km.<cmd>(<args>)\r\n
+//            response ends with ">>> " prompt
 // ---------------------------------------------------------------------------
 
-std::vector<uint8_t> Makcu::build_packet(MCmd cmd,
-                                          const std::vector<uint8_t>& data) const {
-    std::vector<uint8_t> pkt;
-    pkt.reserve(4 + data.size());
-    pkt.push_back(HEADER);
-    pkt.push_back(static_cast<uint8_t>(cmd));
-    pkt.push_back(static_cast<uint8_t>(data.size()));
-    pkt.insert(pkt.end(), data.begin(), data.end());
+std::string Makcu::read_until_prompt(uint32_t timeout_ms) {
+    std::string result;
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(timeout_ms);
 
-    uint8_t xor_sum = 0;
-    for (auto b : pkt) xor_sum ^= b;
-    pkt.push_back(xor_sum);
-
-    return pkt;
+    while (std::chrono::steady_clock::now() < deadline) {
+        uint8_t buf[256];
+        size_t n = serial_.read(buf, sizeof(buf), 50);
+        if (n > 0) {
+            result.append(reinterpret_cast<char*>(buf), n);
+            if (result.size() >= 4) {
+                auto pos = result.find(PROMPT);
+                if (pos != std::string::npos) {
+                    return result.substr(0, pos);
+                }
+            }
+        }
+    }
+    return result;
 }
 
-void Makcu::send_command(MCmd cmd, const std::vector<uint8_t>& data) {
+std::string Makcu::send_command(const std::string& cmd) {
     require_connected();
-    auto pkt = build_packet(cmd, data);
-    serial_.write(pkt);
+    std::string full = cmd + "\r\n";
+    serial_.write(reinterpret_cast<const uint8_t*>(full.data()), full.size());
+    serial_.flush();
+    std::string resp = read_until_prompt(1000);
+    // strip the echoed command from the response
+    auto nl = resp.find('\n');
+    if (nl != std::string::npos)
+        return trim(resp.substr(nl + 1));
+    return trim(resp);
+}
+
+void Makcu::send_command_no_response(const std::string& cmd) {
+    require_connected();
+    std::string full = cmd + "\r\n";
+    serial_.write(reinterpret_cast<const uint8_t*>(full.data()), full.size());
     serial_.flush();
 }
 
-std::vector<uint8_t> Makcu::send_and_receive(MCmd cmd,
-                                              const std::vector<uint8_t>& data) {
-    send_command(cmd, data);
-    try {
-        auto hdr = serial_.read_exact(3, 1000);
-        if (hdr[0] != HEADER)
-            throw ProtocolError("Makcu: invalid response header");
-        uint8_t len = hdr[2];
-        auto body = serial_.read_exact(len + 1, 1000); // data + checksum
-        return std::vector<uint8_t>(body.begin(), body.begin() + len);
-    } catch (const DeviceTimeoutError&) {
-        return {};
+// ---------------------------------------------------------------------------
+// lock target names
+// ---------------------------------------------------------------------------
+
+const char* Makcu::lock_target_str(MakcuLockTarget target) {
+    switch (target) {
+        case MakcuLockTarget::MX:  return "mx";
+        case MakcuLockTarget::MY:  return "my";
+        case MakcuLockTarget::MW:  return "mw";
+        case MakcuLockTarget::ML:  return "ml";
+        case MakcuLockTarget::MM:  return "mm";
+        case MakcuLockTarget::MR:  return "mr";
+        case MakcuLockTarget::MS1: return "ms1";
+        case MakcuLockTarget::MS2: return "ms2";
     }
+    return "mx";
+}
+
+uint8_t Makcu::mouse_button_to_makcu(MouseButton button) {
+    if (has_flag(button, MouseButton::Left))   return 1;
+    if (has_flag(button, MouseButton::Right))  return 2;
+    if (has_flag(button, MouseButton::Middle)) return 3;
+    if (has_flag(button, MouseButton::Side1))  return 4;
+    if (has_flag(button, MouseButton::Side2))  return 5;
+    return 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,55 +132,60 @@ std::vector<uint8_t> Makcu::send_and_receive(MCmd cmd,
 
 void Makcu::mouse_move(int32_t dx, int32_t dy) {
     std::lock_guard<std::mutex> lock(mutex_);
-    dx = std::clamp(dx, -32768, 32767);
-    dy = std::clamp(dy, -32768, 32767);
-    std::vector<uint8_t> data;
-    push_i16(data, static_cast<int16_t>(dx));
-    push_i16(data, static_cast<int16_t>(dy));
-    send_command(MCMD_MOUSE_MOVE, data);
+    send_command("km.move(" + std::to_string(dx) + "," + std::to_string(dy) + ")");
 }
 
 void Makcu::mouse_move_absolute(int32_t x, int32_t y) {
+    // Makcu only supports relative movement
     mouse_move(x, y);
 }
 
 void Makcu::mouse_move_smooth(int32_t dx, int32_t dy, uint32_t duration_ms) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<uint8_t> data;
-    push_i32_le(data, std::clamp(dx, -32768, 32767));
-    push_i32_le(data, std::clamp(dy, -32768, 32767));
-    push_u16(data, static_cast<uint16_t>(duration_ms));
-    send_command(MCMD_MOUSE_AUTO, data);
+    // Makcu has no native smooth move; interpolate with multiple km.move calls
+    const int steps = std::max(1, static_cast<int>(duration_ms / 5));
+    const int step_dx = dx / steps;
+    const int step_dy = dy / steps;
+    int remaining_x = dx;
+    int remaining_y = dy;
+
+    for (int i = 0; i < steps - 1; ++i) {
+        mouse_move(step_dx, step_dy);
+        remaining_x -= step_dx;
+        remaining_y -= step_dy;
+        std::this_thread::sleep_for(std::chrono::milliseconds(duration_ms / steps));
+    }
+    // final step: send remainder
+    if (remaining_x != 0 || remaining_y != 0)
+        mouse_move(remaining_x, remaining_y);
 }
 
 void Makcu::mouse_press(MouseButton button) {
     std::lock_guard<std::mutex> lock(mutex_);
-    current_buttons_ |= static_cast<uint8_t>(button);
-    send_command(MCMD_MOUSE_BUTTON, {current_buttons_});
+    uint8_t btn = mouse_button_to_makcu(button);
+    send_command("km.button_down(" + std::to_string(btn) + ")");
 }
 
 void Makcu::mouse_release(MouseButton button) {
     std::lock_guard<std::mutex> lock(mutex_);
-    current_buttons_ &= ~static_cast<uint8_t>(button);
-    send_command(MCMD_MOUSE_BUTTON, {current_buttons_});
+    uint8_t btn = mouse_button_to_makcu(button);
+    send_command("km.button_up(" + std::to_string(btn) + ")");
 }
 
 void Makcu::mouse_click(MouseButton button) {
-    mouse_press(button);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
-    mouse_release(button);
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint8_t btn = mouse_button_to_makcu(button);
+    send_command("km.click(" + std::to_string(btn) + ")");
 }
 
 void Makcu::mouse_double_click(MouseButton button) {
-    mouse_click(button);
-    std::this_thread::sleep_for(std::chrono::milliseconds(60));
-    mouse_click(button);
+    std::lock_guard<std::mutex> lock(mutex_);
+    uint8_t btn = mouse_button_to_makcu(button);
+    send_command("km.click(" + std::to_string(btn) + ",2)");
 }
 
 void Makcu::mouse_scroll(int32_t delta) {
     std::lock_guard<std::mutex> lock(mutex_);
-    int8_t d = static_cast<int8_t>(std::clamp(delta, -127, 127));
-    send_command(MCMD_MOUSE_WHEEL, {static_cast<uint8_t>(d)});
+    send_command("km.wheel(" + std::to_string(delta) + ")");
 }
 
 // ---------------------------------------------------------------------------
@@ -166,64 +194,84 @@ void Makcu::mouse_scroll(int32_t delta) {
 
 void Makcu::key_press(KeyCode key, KeyModifier modifiers) {
     std::lock_guard<std::mutex> lock(mutex_);
-    current_modifier_ |= static_cast<uint8_t>(modifiers);
-
-    uint8_t code = static_cast<uint8_t>(key);
-    bool already = false;
-    for (int i = 0; i < 6; ++i) {
-        if (current_keys_[i] == code) { already = true; break; }
+    // send modifier keys first if needed
+    if (modifiers != KeyModifier::None) {
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftCtrl))
+            send_command("km.down('lctrl')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftShift))
+            send_command("km.down('lshift')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftAlt))
+            send_command("km.down('lalt')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftGui))
+            send_command("km.down('lgui')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightCtrl))
+            send_command("km.down('rctrl')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightShift))
+            send_command("km.down('rshift')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightAlt))
+            send_command("km.down('ralt')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightGui))
+            send_command("km.down('rgui')");
     }
-    if (!already) {
-        for (int i = 0; i < 6; ++i) {
-            if (current_keys_[i] == 0) { current_keys_[i] = code; break; }
-        }
-    }
-
-    std::vector<uint8_t> data = {current_modifier_};
-    data.insert(data.end(), current_keys_, current_keys_ + 6);
-    send_command(MCMD_KEYBOARD, data);
+    // send key as HID code
+    send_command("km.down(" + std::to_string(static_cast<int>(key)) + ")");
 }
 
 void Makcu::key_release(KeyCode key) {
     std::lock_guard<std::mutex> lock(mutex_);
-    uint8_t code = static_cast<uint8_t>(key);
-    for (int i = 0; i < 6; ++i) {
-        if (current_keys_[i] == code) { current_keys_[i] = 0; break; }
-    }
-    std::vector<uint8_t> data = {current_modifier_};
-    data.insert(data.end(), current_keys_, current_keys_ + 6);
-    send_command(MCMD_KEYBOARD, data);
+    send_command("km.up(" + std::to_string(static_cast<int>(key)) + ")");
 }
 
 void Makcu::key_tap(KeyCode key, KeyModifier modifiers) {
     key_press(key, modifiers);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
     key_release(key);
+    // release modifiers
     if (modifiers != KeyModifier::None) {
         std::lock_guard<std::mutex> lock(mutex_);
-        current_modifier_ &= ~static_cast<uint8_t>(modifiers);
-        std::vector<uint8_t> data = {current_modifier_};
-        data.insert(data.end(), current_keys_, current_keys_ + 6);
-        send_command(MCMD_KEYBOARD, data);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftCtrl))
+            send_command("km.up('lctrl')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftShift))
+            send_command("km.up('lshift')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftAlt))
+            send_command("km.up('lalt')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftGui))
+            send_command("km.up('lgui')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightCtrl))
+            send_command("km.up('rctrl')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightShift))
+            send_command("km.up('rshift')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightAlt))
+            send_command("km.up('ralt')");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightGui))
+            send_command("km.up('rgui')");
     }
 }
 
 void Makcu::key_release_all() {
+    // release all standard modifier keys
     std::lock_guard<std::mutex> lock(mutex_);
-    current_modifier_ = 0;
-    std::memset(current_keys_, 0, sizeof(current_keys_));
-    send_command(MCMD_RELEASE_ALL);
+    send_command("km.up('lctrl')");
+    send_command("km.up('lshift')");
+    send_command("km.up('lalt')");
+    send_command("km.up('lgui')");
+    send_command("km.up('rctrl')");
+    send_command("km.up('rshift')");
+    send_command("km.up('ralt')");
+    send_command("km.up('rgui')");
 }
 
-void Makcu::type_string(const std::string& text, uint32_t interval_ms) {
-    const auto& cmap = char_map();
+void Makcu::type_string(const std::string& text, uint32_t /* interval_ms */) {
+    // km.type() handles timing and shift automatically
+    std::lock_guard<std::mutex> lock(mutex_);
+    // escape single quotes in the text
+    std::string escaped;
     for (char c : text) {
-        auto it = cmap.find(c);
-        if (it == cmap.end()) continue;
-        key_tap(it->second.key, it->second.modifier);
-        if (interval_ms > 0)
-            std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
+        if (c == '\'') escaped += "\\'";
+        else if (c == '\\') escaped += "\\\\";
+        else escaped += c;
     }
+    send_command("km.type('" + escaped + "')");
 }
 
 // ---------------------------------------------------------------------------
@@ -233,37 +281,177 @@ void Makcu::type_string(const std::string& text, uint32_t interval_ms) {
 std::string Makcu::device_name() const { return "Makcu"; }
 
 DeviceInfo Makcu::get_info() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto resp = send_and_receive(MCMD_DEVICE_INFO);
+    auto full = device_info_full();
     DeviceInfo info;
     info.device_type = "Makcu";
-    if (resp.size() >= 3) {
-        info.firmware_version = std::to_string(resp[0]) + "." +
-                                std::to_string(resp[1]) + "." +
-                                std::to_string(resp[2]);
-    } else {
-        info.firmware_version = "unknown";
-    }
+    info.firmware_version = full.firmware;
+    info.serial_number = full.serial;
     return info;
 }
 
 void Makcu::reboot() {
     std::lock_guard<std::mutex> lock(mutex_);
-    send_command(MCMD_REBOOT);
+    send_command_no_response("km.reboot()");
+    connected_ = false;
 }
 
-void Makcu::set_dpi(uint16_t dpi) {
+// ---------------------------------------------------------------------------
+// Makcu-specific
+// ---------------------------------------------------------------------------
+
+void Makcu::silent_move(int32_t dx, int32_t dy) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<uint8_t> data = {0x01};
-    push_u16(data, dpi);
-    send_command(MCMD_SET_CONFIG, data);
+    send_command("km.silent_move(" + std::to_string(dx) + "," +
+                 std::to_string(dy) + ")");
 }
 
-void Makcu::set_poll_rate(uint16_t rate_hz) {
+void Makcu::click(MakcuButton button, int count, int delay_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<uint8_t> data = {0x02};
-    push_u16(data, rate_hz);
-    send_command(MCMD_SET_CONFIG, data);
+    std::string cmd = "km.click(" + std::to_string(static_cast<int>(button));
+    if (count > 1 || delay_ms >= 0) {
+        cmd += "," + std::to_string(count);
+        if (delay_ms >= 0)
+            cmd += "," + std::to_string(delay_ms);
+    }
+    cmd += ")";
+    send_command(cmd);
+}
+
+void Makcu::turbo(MakcuButton button, int delay_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.turbo(" + std::to_string(static_cast<int>(button)) + "," +
+                 std::to_string(delay_ms) + ")");
+}
+
+void Makcu::turbo_disable_all() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.turbo(0)");
+}
+
+void Makcu::lock(MakcuLockTarget target) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command(std::string("km.lock(") + lock_target_str(target) + ",1)");
+}
+
+void Makcu::unlock(MakcuLockTarget target) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command(std::string("km.lock(") + lock_target_str(target) + ",0)");
+}
+
+int Makcu::lock_state(MakcuLockTarget target) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto resp = send_command(std::string("km.lock(") + lock_target_str(target) + ")");
+    try { return std::stoi(resp); }
+    catch (...) { return 0; }
+}
+
+std::unordered_map<std::string, int> Makcu::lock_states_all() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto resp = send_command("km.lock()");
+    std::unordered_map<std::string, int> states;
+
+    // parse key=value pairs
+    std::istringstream stream(resp);
+    std::string line;
+    while (std::getline(stream, line)) {
+        auto eq = line.find('=');
+        if (eq != std::string::npos) {
+            std::string key = trim(line.substr(0, eq));
+            std::string val = trim(line.substr(eq + 1));
+            try { states[key] = std::stoi(val); }
+            catch (...) { states[key] = 0; }
+        }
+    }
+    return states;
+}
+
+void Makcu::stream_set(MakcuStreamMode mode, int period_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string cmd = "km.stream(" + std::to_string(static_cast<int>(mode));
+    if (period_ms > 0)
+        cmd += "," + std::to_string(period_ms);
+    cmd += ")";
+    send_command(cmd);
+}
+
+MakcuStreamMode Makcu::stream_mode() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto resp = send_command("km.stream()");
+    try {
+        int val = std::stoi(resp);
+        return static_cast<MakcuStreamMode>(val);
+    } catch (...) {
+        return MakcuStreamMode::Off;
+    }
+}
+
+void Makcu::echo(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.echo(" + std::to_string(enabled ? 1 : 0) + ")");
+}
+
+std::string Makcu::serial_number() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return send_command("km.serial()");
+}
+
+void Makcu::set_serial(const std::string& serial) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.set_serial('" + serial + "')");
+}
+
+MakcuDeviceInfo Makcu::device_info_full() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto resp = send_command("km.info()");
+
+    MakcuDeviceInfo info;
+    std::istringstream stream(resp);
+    std::string line;
+    while (std::getline(stream, line)) {
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = trim(line.substr(0, eq));
+        std::string val = trim(line.substr(eq + 1));
+
+        if (key == "MAC")      info.mac = val;
+        else if (key == "FW")  info.firmware = val;
+        else if (key == "CPU") info.cpu = val;
+        else if (key == "VENDOR") info.vendor = val;
+        else if (key == "MODEL")  info.model = val;
+        else if (key == "SERIAL") info.serial = val;
+        else if (key == "VID")    info.vid = val;
+        else if (key == "PID")    info.pid = val;
+        else if (key == "TEMP") {
+            try { info.temp_c = std::stoi(val); } catch (...) {}
+        }
+        else if (key == "RAM") {
+            try { info.ram_free = std::stoi(val); } catch (...) {}
+        }
+        else if (key == "UPTIME") {
+            try { info.uptime_s = std::stoi(val); } catch (...) {}
+        }
+    }
+    return info;
+}
+
+std::string Makcu::firmware_version() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return send_command("km.version()");
+}
+
+void Makcu::key_down(const std::string& key_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.down('" + key_name + "')");
+}
+
+void Makcu::key_up(const std::string& key_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.up('" + key_name + "')");
+}
+
+void Makcu::key_press_name(const std::string& key_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.press('" + key_name + "')");
 }
 
 } // namespace im
