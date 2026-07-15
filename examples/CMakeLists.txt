@@ -1,0 +1,11 @@
+add_executable(example_kmbox_b example_kmbox_b.cpp)
+target_link_libraries(example_kmbox_b PRIVATE input_manager)
+
+add_executable(example_kmbox_net example_kmbox_net.cpp)
+target_link_libraries(example_kmbox_net PRIVATE input_manager)
+
+add_executable(example_makcu example_makcu.cpp)
+target_link_libraries(example_makcu PRIVATE input_manager)
+
+add_executable(example_multi_device example_multi_device.cpp)
+target_link_libraries(example_multi_device PRIVATE input_manager)
