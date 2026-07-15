@@ -12,14 +12,11 @@ namespace im {
 // helpers
 // ---------------------------------------------------------------------------
 
-static void push_i16(std::vector<uint8_t>& v, int16_t val) {
-    v.push_back(static_cast<uint8_t>(val & 0xFF));
-    v.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
-}
-
-static void push_u16(std::vector<uint8_t>& v, uint16_t val) {
-    v.push_back(static_cast<uint8_t>(val & 0xFF));
-    v.push_back(static_cast<uint8_t>((val >> 8) & 0xFF));
+static std::string trim(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -39,9 +36,9 @@ void KMBoxB::connect() {
     std::lock_guard<std::mutex> lock(mutex_);
     serial_.open(port_name_, baud_rate_);
     connected_ = true;
-    std::memset(current_keys_, 0, sizeof(current_keys_));
-    current_buttons_ = 0;
-    current_modifier_ = 0;
+
+    uint8_t junk[256];
+    serial_.read(junk, sizeof(junk), 100);
 }
 
 void KMBoxB::disconnect() {
@@ -55,47 +52,68 @@ void KMBoxB::disconnect() {
 bool KMBoxB::is_connected() const { return connected_; }
 
 // ---------------------------------------------------------------------------
-// protocol
+// protocol — ASCII commands: km.<cmd>(<args>)\r\n
 // ---------------------------------------------------------------------------
 
-std::vector<uint8_t> KMBoxB::build_packet(Cmd cmd,
-                                           const std::vector<uint8_t>& data) const {
-    std::vector<uint8_t> pkt;
-    pkt.reserve(6 + data.size());
-    pkt.push_back(HEADER_1);
-    pkt.push_back(HEADER_2);
-    pkt.push_back(static_cast<uint8_t>(cmd));
-    uint16_t len = static_cast<uint16_t>(data.size());
-    pkt.push_back(static_cast<uint8_t>(len & 0xFF));
-    pkt.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
-    pkt.insert(pkt.end(), data.begin(), data.end());
+std::string KMBoxB::read_response(uint32_t timeout_ms) {
+    std::string result;
+    auto deadline = std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(timeout_ms);
 
-    uint8_t sum = 0;
-    for (auto b : pkt) sum += b;
-    pkt.push_back(sum);
-
-    return pkt;
+    while (std::chrono::steady_clock::now() < deadline) {
+        uint8_t buf[256];
+        size_t n = serial_.read(buf, sizeof(buf), 50);
+        if (n > 0) {
+            result.append(reinterpret_cast<char*>(buf), n);
+            if (result.size() >= 2 && result.back() == '\n')
+                return result;
+        }
+    }
+    return result;
 }
 
-void KMBoxB::send_command(Cmd cmd, const std::vector<uint8_t>& data) {
+std::string KMBoxB::send_command(const std::string& cmd) {
     require_connected();
-    auto pkt = build_packet(cmd, data);
-    serial_.write(pkt);
+    std::string full = cmd + "\r\n";
+    serial_.write(reinterpret_cast<const uint8_t*>(full.data()), full.size());
+    serial_.flush();
+    std::string resp = read_response(500);
+    auto nl = resp.find('\n');
+    if (nl != std::string::npos)
+        return trim(resp.substr(nl + 1));
+    return trim(resp);
+}
+
+void KMBoxB::send_command_no_response(const std::string& cmd) {
+    require_connected();
+    std::string full = cmd + "\r\n";
+    serial_.write(reinterpret_cast<const uint8_t*>(full.data()), full.size());
     serial_.flush();
 }
 
+const char* KMBoxB::button_cmd_name(MouseButton button) {
+    if (has_flag(button, MouseButton::Left))   return "left";
+    if (has_flag(button, MouseButton::Right))  return "right";
+    if (has_flag(button, MouseButton::Middle)) return "middle";
+    if (has_flag(button, MouseButton::Side1))  return "side1";
+    if (has_flag(button, MouseButton::Side2))  return "side2";
+    return "left";
+}
+
 // ---------------------------------------------------------------------------
-// mouse
+// mouse — km.move(x,y), km.left(state), km.right(state), etc.
 // ---------------------------------------------------------------------------
 
 void KMBoxB::mouse_move(int32_t dx, int32_t dy) {
     std::lock_guard<std::mutex> lock(mutex_);
-    dx = std::clamp(dx, -32768, 32767);
-    dy = std::clamp(dy, -32768, 32767);
-    std::vector<uint8_t> data;
-    push_i16(data, static_cast<int16_t>(dx));
-    push_i16(data, static_cast<int16_t>(dy));
-    send_command(CMD_MOUSE_MOVE, data);
+    send_command("km.move(" + std::to_string(dx) + "," +
+                 std::to_string(dy) + ")");
+}
+
+void KMBoxB::mouse_move_speed(int32_t dx, int32_t dy, int speed) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.move(" + std::to_string(dx) + "," +
+                 std::to_string(dy) + "," + std::to_string(speed) + ")");
 }
 
 void KMBoxB::mouse_move_absolute(int32_t x, int32_t y) {
@@ -103,24 +121,30 @@ void KMBoxB::mouse_move_absolute(int32_t x, int32_t y) {
 }
 
 void KMBoxB::mouse_move_smooth(int32_t dx, int32_t dy, uint32_t duration_ms) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<uint8_t> data;
-    push_i16(data, static_cast<int16_t>(std::clamp(dx, -32768, 32767)));
-    push_i16(data, static_cast<int16_t>(std::clamp(dy, -32768, 32767)));
-    push_u16(data, static_cast<uint16_t>(duration_ms));
-    send_command(CMD_MOUSE_AUTO, data);
+    const int steps = std::max(1, static_cast<int>(duration_ms / 5));
+    const int step_dx = dx / steps;
+    const int step_dy = dy / steps;
+    int remaining_x = dx;
+    int remaining_y = dy;
+
+    for (int i = 0; i < steps - 1; ++i) {
+        mouse_move(step_dx, step_dy);
+        remaining_x -= step_dx;
+        remaining_y -= step_dy;
+        std::this_thread::sleep_for(std::chrono::milliseconds(duration_ms / steps));
+    }
+    if (remaining_x != 0 || remaining_y != 0)
+        mouse_move(remaining_x, remaining_y);
 }
 
 void KMBoxB::mouse_press(MouseButton button) {
     std::lock_guard<std::mutex> lock(mutex_);
-    current_buttons_ |= static_cast<uint8_t>(button);
-    send_command(CMD_MOUSE_BUTTON, {current_buttons_});
+    send_command(std::string("km.") + button_cmd_name(button) + "(1)");
 }
 
 void KMBoxB::mouse_release(MouseButton button) {
     std::lock_guard<std::mutex> lock(mutex_);
-    current_buttons_ &= ~static_cast<uint8_t>(button);
-    send_command(CMD_MOUSE_BUTTON, {current_buttons_});
+    send_command(std::string("km.") + button_cmd_name(button) + "(0)");
 }
 
 void KMBoxB::mouse_click(MouseButton button) {
@@ -137,64 +161,70 @@ void KMBoxB::mouse_double_click(MouseButton button) {
 
 void KMBoxB::mouse_scroll(int32_t delta) {
     std::lock_guard<std::mutex> lock(mutex_);
-    int8_t d = static_cast<int8_t>(std::clamp(delta, -127, 127));
-    send_command(CMD_MOUSE_WHEEL, {static_cast<uint8_t>(d)});
+    send_command("km.wheel(" + std::to_string(delta) + ")");
 }
 
 // ---------------------------------------------------------------------------
-// keyboard
+// keyboard — km.keydown(hid_code), km.keyup(hid_code)
 // ---------------------------------------------------------------------------
 
 void KMBoxB::key_press(KeyCode key, KeyModifier modifiers) {
     std::lock_guard<std::mutex> lock(mutex_);
-    current_modifier_ |= static_cast<uint8_t>(modifiers);
-
-    uint8_t code = static_cast<uint8_t>(key);
-    bool already = false;
-    for (int i = 0; i < 6; ++i) {
-        if (current_keys_[i] == code) { already = true; break; }
+    if (modifiers != KeyModifier::None) {
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftCtrl))
+            send_command("km.keydown(224)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftShift))
+            send_command("km.keydown(225)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftAlt))
+            send_command("km.keydown(226)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftGui))
+            send_command("km.keydown(227)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightCtrl))
+            send_command("km.keydown(228)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightShift))
+            send_command("km.keydown(229)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightAlt))
+            send_command("km.keydown(230)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightGui))
+            send_command("km.keydown(231)");
     }
-    if (!already) {
-        for (int i = 0; i < 6; ++i) {
-            if (current_keys_[i] == 0) { current_keys_[i] = code; break; }
-        }
-    }
-
-    std::vector<uint8_t> data = {current_modifier_, 0x00};
-    data.insert(data.end(), current_keys_, current_keys_ + 6);
-    send_command(CMD_KEYBOARD, data);
+    send_command("km.keydown(" + std::to_string(static_cast<int>(key)) + ")");
 }
 
 void KMBoxB::key_release(KeyCode key) {
     std::lock_guard<std::mutex> lock(mutex_);
-    uint8_t code = static_cast<uint8_t>(key);
-    for (int i = 0; i < 6; ++i) {
-        if (current_keys_[i] == code) { current_keys_[i] = 0; break; }
-    }
-
-    std::vector<uint8_t> data = {current_modifier_, 0x00};
-    data.insert(data.end(), current_keys_, current_keys_ + 6);
-    send_command(CMD_KEYBOARD, data);
+    send_command("km.keyup(" + std::to_string(static_cast<int>(key)) + ")");
 }
 
 void KMBoxB::key_tap(KeyCode key, KeyModifier modifiers) {
     key_press(key, modifiers);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
     key_release(key);
     if (modifiers != KeyModifier::None) {
         std::lock_guard<std::mutex> lock(mutex_);
-        current_modifier_ &= ~static_cast<uint8_t>(modifiers);
-        std::vector<uint8_t> data = {current_modifier_, 0x00};
-        data.insert(data.end(), current_keys_, current_keys_ + 6);
-        send_command(CMD_KEYBOARD, data);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftCtrl))
+            send_command("km.keyup(224)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftShift))
+            send_command("km.keyup(225)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftAlt))
+            send_command("km.keyup(226)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftGui))
+            send_command("km.keyup(227)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightCtrl))
+            send_command("km.keyup(228)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightShift))
+            send_command("km.keyup(229)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightAlt))
+            send_command("km.keyup(230)");
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightGui))
+            send_command("km.keyup(231)");
     }
 }
 
 void KMBoxB::key_release_all() {
     std::lock_guard<std::mutex> lock(mutex_);
-    current_modifier_ = 0;
-    std::memset(current_keys_, 0, sizeof(current_keys_));
-    send_command(CMD_RELEASE_ALL);
+    for (int code = 224; code <= 231; ++code)
+        send_command("km.keyup(" + std::to_string(code) + ")");
 }
 
 void KMBoxB::type_string(const std::string& text, uint32_t interval_ms) {
@@ -215,34 +245,85 @@ void KMBoxB::type_string(const std::string& text, uint32_t interval_ms) {
 std::string KMBoxB::device_name() const { return "KMBox B"; }
 
 DeviceInfo KMBoxB::get_info() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    send_command(CMD_INFO);
-    try {
-        auto resp = serial_.read_exact(16, 1000);
-        DeviceInfo info;
-        info.device_type = "KMBox B";
-        if (resp.size() >= 6) {
-            info.firmware_version = std::to_string(resp[3]) + "." +
-                                    std::to_string(resp[4]) + "." +
-                                    std::to_string(resp[5]);
-        }
-        return info;
-    } catch (...) {
-        return {"KMBox B", "unknown", ""};
-    }
+    DeviceInfo info;
+    info.device_type = "KMBox B";
+    info.firmware_version = "unknown";
+    return info;
 }
 
 void KMBoxB::reboot() {
     std::lock_guard<std::mutex> lock(mutex_);
-    send_command(CMD_REBOOT);
+    send_command_no_response("km.reboot()");
+    connected_ = false;
 }
+
+// ---------------------------------------------------------------------------
+// KMBox B specific — mask, monitor, isdown, baud, lcd, VID/PID
+// ---------------------------------------------------------------------------
 
 void KMBoxB::set_mouse_mask(int32_t mask_x, int32_t mask_y) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<uint8_t> data;
-    push_i16(data, static_cast<int16_t>(mask_x));
-    push_i16(data, static_cast<int16_t>(mask_y));
-    send_command(CMD_MOUSE_MASK, data);
+    send_command("km.mask(" + std::to_string(mask_x) + "," +
+                 std::to_string(mask_y) + ")");
+}
+
+void KMBoxB::clear_mouse_mask() {
+    set_mouse_mask(0, 0);
+}
+
+void KMBoxB::monitor(int port) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.monitor(" + std::to_string(port) + ")");
+}
+
+bool KMBoxB::isdown_left() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto resp = send_command("km.isdown(left)");
+    return resp == "1" || resp == "true";
+}
+
+bool KMBoxB::isdown_right() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto resp = send_command("km.isdown(right)");
+    return resp == "1" || resp == "true";
+}
+
+bool KMBoxB::isdown_middle() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto resp = send_command("km.isdown(middle)");
+    return resp == "1" || resp == "true";
+}
+
+bool KMBoxB::isdown_side1() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto resp = send_command("km.isdown(side1)");
+    return resp == "1" || resp == "true";
+}
+
+bool KMBoxB::isdown_side2() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto resp = send_command("km.isdown(side2)");
+    return resp == "1" || resp == "true";
+}
+
+void KMBoxB::set_baud(uint32_t baud) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.baud(" + std::to_string(baud) + ")");
+}
+
+void KMBoxB::lcd(const std::string& text) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.lcd('" + text + "')");
+}
+
+void KMBoxB::set_vid(const std::string& vid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("device.VID('" + vid + "')");
+}
+
+void KMBoxB::set_pid(const std::string& pid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("device.PID('" + pid + "')");
 }
 
 } // namespace im

@@ -1,14 +1,14 @@
 # InputManager
 
-SDK C++ unifié pour contrôler des périphériques d'entrée matériels : **KMBox B**, **KMBox Net** et **Makcu**.
+SDK C++ unifié pour contrôler des périphériques d'entrée matériels : **KMBox B** (B+/B Pro), **KMBox Net** et **Makcu**.
 
 ## Appareils supportés
 
-| Appareil | Transport | Protocole | Baud / Port |
+| Appareil | Transport | Protocole | Puce / Port |
 |-----------|-----------|-----------|-------------|
-| KMBox B | USB Serial | Binaire `[0x57][0xAB][cmd][len][data][sum]` | 115200 |
-| KMBox Net | UDP | Binaire `[MAGIC][cmd][rand][len][data]` + AES-128-ECB | IP:16820 |
-| Makcu | CH343 USB Serial | ASCII `km.<cmd>(<args>)\r\n` | 115200 (jusqu'à 4 Mbps) |
+| KMBox B / B+ / B Pro | USB Serial (CH340) | ASCII `km.<cmd>(<args>)\r\n` | 115200 baud |
+| KMBox Net | UDP | Binaire + AES-128-ECB | IP:16820 |
+| Makcu | USB Serial (CH343) | ASCII `km.<cmd>(<args>)\r\n` | 115200 (jusqu'à 4 Mbps) |
 
 ## Build
 
@@ -20,32 +20,76 @@ make -j$(nproc)
 
 ## API rapide
 
-### KMBox B (série, binaire)
+### KMBox B / B+ / B Pro (série CH340, ASCII)
 
 ```cpp
 #include <input_manager/input_manager.hpp>
 
-im::KMBoxB device("COM3");
+im::KMBoxB device("COM3"); // Linux: "/dev/ttyUSB0"
 device.connect();
+
+// mouse
 device.mouse_move(100, 50);
+device.mouse_move_speed(200, 100, 10); // with speed param
 device.mouse_click();
+device.mouse_scroll(-3);
+
+// buttons — km.left(state), km.right(state), etc.
+device.mouse_press(im::MouseButton::Left);
+device.mouse_release(im::MouseButton::Left);
+
+// keyboard — km.keydown(hid_code), km.keyup(hid_code)
 device.key_tap(im::KeyCode::A);
 device.type_string("Hello!");
+
+// monitor physical input
+device.monitor(1);
+bool pressed = device.isdown_left();
+device.monitor(0);
+
+// mouse mask
+device.set_mouse_mask(5, 5);
+device.clear_mouse_mask();
+
 device.disconnect();
 ```
 
-### KMBox Net (UDP, chiffré)
+### KMBox Net (UDP, AES-128-ECB)
 
 ```cpp
 im::KMBoxNet net("192.168.1.100", 16820, "uuid");
 net.set_encryption(true);
 net.connect();
-net.mouse_move_absolute(960, 540);
-net.mouse_move_smooth(200, 100, 500);
+
+// mouse: move, move_auto, move_beizer
+net.mouse_move(200, 100);
+net.move_auto(300, 200, 500);
+net.move_beizer(400, 300, 800, 100, 200, 300, 100);
+
+// buttons: left/right/middle/side1/side2(state)
+net.left(1);  // press
+net.left(0);  // release
+
+// combined mouse report
+net.mouse_combined(0x01, 50, 50, 0);
+
+// encrypted variants
+net.enc_move(100, -50);
+net.enc_left(1);
+
+// monitor physical input
+net.monitor(1);
+bool down = net.isdown_left();
+net.monitor(0);
+
+// mouse/keyboard mask
+net.mask_mouse(10, 5);
+net.unmask_mouse();
+
 net.disconnect();
 ```
 
-### Makcu (série, ASCII — protocole km.*)
+### Makcu (série CH343, ASCII — protocole km.*)
 
 ```cpp
 im::Makcu makcu("/dev/ttyUSB0"); // VID:PID 1A86:55D3
@@ -101,8 +145,17 @@ mgr.active().mouse_click();
 mgr["kb"].type_string("Hello");
 
 // accès typé pour fonctions spécifiques
-mgr.get_as<im::KMBoxNet>("net").set_encryption(true);
-mgr.get_as<im::Makcu>("makcu").turbo(im::MakcuButton::Left, 100);
+auto& kb = mgr.get_as<im::KMBoxB>("kb");
+kb.monitor(1);
+kb.set_mouse_mask(5, 5);
+
+auto& net = mgr.get_as<im::KMBoxNet>("net");
+net.set_encryption(true);
+net.move_beizer(200, 100, 500, 50, 100, 150, 50);
+net.enc_move(10, 10);
+
+auto& makcu = mgr.get_as<im::Makcu>("makcu");
+makcu.turbo(im::MakcuButton::Left, 100);
 
 // opérations groupées
 mgr.mouse_move_all(10, 0);
@@ -129,18 +182,20 @@ mouse_scroll(delta)
 
 ### Fonctions spécifiques par appareil
 
-| KMBox B | KMBox Net | Makcu |
+| KMBox B / B+ / B Pro | KMBox Net | Makcu |
 |---------|-----------|-------|
-| `set_mouse_mask(x, y)` | `set_encryption(bool)` | `click(btn, count, delay_ms)` |
-| | `set_monitor_resolution(w, h)` | `silent_move(dx, dy)` |
-| | `monitor_capture()` | `turbo(btn, delay_ms)` / `turbo_disable_all()` |
-| | | `lock(target)` / `unlock(target)` / `lock_state(target)` |
-| | | `stream_set(mode, period_ms)` / `stream_mode()` |
-| | | `echo(bool)` |
-| | | `serial_number()` / `set_serial(s)` |
-| | | `device_info_full()` → MAC, CPU, TEMP, RAM... |
-| | | `firmware_version()` |
-| | | `key_down(name)` / `key_up(name)` / `key_press_name(name)` |
+| `mouse_move_speed(dx, dy, speed)` | `set_encryption(bool)` / `encryption_enabled()` | `click(btn, count, delay_ms)` |
+| `set_mouse_mask(x, y)` / `clear_mouse_mask()` | `move_auto(x, y, ms)` | `silent_move(dx, dy)` |
+| `monitor(port)` | `move_beizer(x, y, ms, cx1, cy1, cx2, cy2)` | `turbo(btn, ms)` / `turbo_disable_all()` |
+| `isdown_left/right/middle/side1/side2()` | `mouse_combined(btns, x, y, wheel)` | `lock(target)` / `unlock(target)` / `lock_state(target)` |
+| `set_baud(rate)` | `left/right/middle/side1/side2(state)` | `stream_set(mode, period_ms)` / `stream_mode()` |
+| `lcd(text)` (B Pro) | `wheel(direction)` | `echo(bool)` |
+| `set_vid(vid)` / `set_pid(pid)` | `keydown/keyup(hid_code)` | `serial_number()` / `set_serial(s)` |
+| | `monitor(port)` | `device_info_full()` → MAC, CPU, TEMP, RAM... |
+| | `isdown_left/right/middle/side1/side2()` | `firmware_version()` |
+| | `enc_move/left/right/middle/side1/side2/wheel()` | `key_down/up/press_name(name)` |
+| | `mask_mouse(x, y)` / `unmask_mouse()` | |
+| | `mask_keyboard(key)` / `unmask_keyboard()` | |
 
 ## Types
 
@@ -169,9 +224,9 @@ include/input_manager/
 │   ├── serial_port.hpp        ← communication série cross-platform
 │   └── udp_client.hpp         ← client UDP cross-platform
 └── devices/
-    ├── kmbox_b.hpp            ← KMBox B (série, binaire)
+    ├── kmbox_b.hpp            ← KMBox B/B+/B Pro (série CH340, ASCII km.*)
     ├── kmbox_net.hpp          ← KMBox Net (UDP, AES-128-ECB)
-    └── makcu.hpp              ← Makcu (série ASCII, protocole km.*)
+    └── makcu.hpp              ← Makcu (série CH343, ASCII km.*)
 ```
 
 ## Dépendances

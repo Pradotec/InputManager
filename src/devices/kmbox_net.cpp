@@ -24,6 +24,11 @@ static void push_i32_le(std::vector<uint8_t>& v, int32_t val) {
     push_u32_le(v, static_cast<uint32_t>(val));
 }
 
+static uint32_t read_u32_le(const uint8_t* p) {
+    return uint32_t(p[0]) | (uint32_t(p[1]) << 8) |
+           (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+}
+
 static uint32_t random_u32() {
     static thread_local std::mt19937 gen(
         static_cast<unsigned>(
@@ -31,8 +36,9 @@ static uint32_t random_u32() {
     return gen();
 }
 
-// Minimal AES-128-ECB using a simple software implementation.
-// A full AES library (OpenSSL, mbedtls) can be linked for production use.
+// ---------------------------------------------------------------------------
+// AES-128-ECB — software implementation (no external dependencies)
+// ---------------------------------------------------------------------------
 
 static void aes_expand_key(const uint8_t key[16], uint32_t rk[44]);
 static void aes_encrypt_block(const uint32_t rk[44], const uint8_t in[16],
@@ -40,7 +46,6 @@ static void aes_encrypt_block(const uint32_t rk[44], const uint8_t in[16],
 static void aes_decrypt_block(const uint32_t rk[44], const uint8_t in[16],
                                uint8_t out[16]);
 
-// -- Rijndael S-box and helpers (standard AES) --
 static const uint8_t SBOX[256] = {
     0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
     0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
@@ -134,7 +139,6 @@ static void aes_encrypt_block(const uint32_t rk[44], const uint8_t in[16],
         for (int r = 0; r < 4; ++r)
             state[r][c] = in[c * 4 + r];
 
-    // AddRoundKey(0)
     for (int c = 0; c < 4; ++c) {
         uint32_t k = rk[c];
         state[0][c] ^= uint8_t(k >> 24); state[1][c] ^= uint8_t(k >> 16);
@@ -142,12 +146,10 @@ static void aes_encrypt_block(const uint32_t rk[44], const uint8_t in[16],
     }
 
     for (int round = 1; round <= 10; ++round) {
-        // SubBytes
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c)
                 state[r][c] = SBOX[state[r][c]];
 
-        // ShiftRows
         uint8_t tmp;
         tmp = state[1][0]; state[1][0]=state[1][1]; state[1][1]=state[1][2];
         state[1][2]=state[1][3]; state[1][3]=tmp;
@@ -156,7 +158,6 @@ static void aes_encrypt_block(const uint32_t rk[44], const uint8_t in[16],
         tmp = state[3][3]; state[3][3]=state[3][2]; state[3][2]=state[3][1];
         state[3][1]=state[3][0]; state[3][0]=tmp;
 
-        // MixColumns (skip on last round)
         if (round < 10) {
             for (int c = 0; c < 4; ++c) {
                 uint8_t a0=state[0][c], a1=state[1][c], a2=state[2][c], a3=state[3][c];
@@ -167,7 +168,6 @@ static void aes_encrypt_block(const uint32_t rk[44], const uint8_t in[16],
             }
         }
 
-        // AddRoundKey
         for (int c = 0; c < 4; ++c) {
             uint32_t k = rk[round * 4 + c];
             state[0][c] ^= uint8_t(k >> 24); state[1][c] ^= uint8_t(k >> 16);
@@ -187,7 +187,6 @@ static void aes_decrypt_block(const uint32_t rk[44], const uint8_t in[16],
         for (int r = 0; r < 4; ++r)
             state[r][c] = in[c * 4 + r];
 
-    // AddRoundKey(10)
     for (int c = 0; c < 4; ++c) {
         uint32_t k = rk[40 + c];
         state[0][c] ^= uint8_t(k >> 24); state[1][c] ^= uint8_t(k >> 16);
@@ -195,7 +194,6 @@ static void aes_decrypt_block(const uint32_t rk[44], const uint8_t in[16],
     }
 
     for (int round = 9; round >= 0; --round) {
-        // InvShiftRows
         uint8_t tmp;
         tmp = state[1][3]; state[1][3]=state[1][2]; state[1][2]=state[1][1];
         state[1][1]=state[1][0]; state[1][0]=tmp;
@@ -204,19 +202,16 @@ static void aes_decrypt_block(const uint32_t rk[44], const uint8_t in[16],
         tmp = state[3][0]; state[3][0]=state[3][1]; state[3][1]=state[3][2];
         state[3][2]=state[3][3]; state[3][3]=tmp;
 
-        // InvSubBytes
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c)
                 state[r][c] = INV_SBOX[state[r][c]];
 
-        // AddRoundKey
         for (int c = 0; c < 4; ++c) {
             uint32_t k = rk[round * 4 + c];
             state[0][c] ^= uint8_t(k >> 24); state[1][c] ^= uint8_t(k >> 16);
             state[2][c] ^= uint8_t(k >> 8);  state[3][c] ^= uint8_t(k);
         }
 
-        // InvMixColumns (skip on round 0)
         if (round > 0) {
             for (int c = 0; c < 4; ++c) {
                 uint8_t a0=state[0][c], a1=state[1][c], a2=state[2][c], a3=state[3][c];
@@ -234,7 +229,7 @@ static void aes_decrypt_block(const uint32_t rk[44], const uint8_t in[16],
 }
 
 // ---------------------------------------------------------------------------
-// KMBoxNet
+// KMBoxNet — construction
 // ---------------------------------------------------------------------------
 
 KMBoxNet::KMBoxNet(const std::string& ip, uint16_t port, const std::string& uuid)
@@ -242,20 +237,22 @@ KMBoxNet::KMBoxNet(const std::string& ip, uint16_t port, const std::string& uuid
 
 KMBoxNet::~KMBoxNet() { disconnect(); }
 
-// -- connection --
+// ---------------------------------------------------------------------------
+// connection — init(ip, port, uuid)
+// ---------------------------------------------------------------------------
 
 void KMBoxNet::connect() {
     std::lock_guard<std::mutex> lock(mutex_);
     udp_.open(ip_, port_);
 
-    // derive AES key from UUID (MD5-like simple hash, 16 bytes)
     std::memset(aes_key_.data(), 0, 16);
     for (size_t i = 0; i < uuid_.size(); ++i)
         aes_key_[i % 16] ^= static_cast<uint8_t>(uuid_[i]);
 
-    // send connect command with UUID
     std::vector<uint8_t> payload(uuid_.begin(), uuid_.end());
-    send_packet(NET_CMD_CONNECT, payload);
+    auto hdr = build_header(NET_CMD_CONNECT, static_cast<uint32_t>(payload.size()));
+    hdr.insert(hdr.end(), payload.begin(), payload.end());
+    udp_.send(hdr);
 
     auto resp = udp_.receive_vec(256, 2000);
     if (resp.size() < HEADER_SIZE)
@@ -277,7 +274,9 @@ void KMBoxNet::disconnect() {
 
 bool KMBoxNet::is_connected() const { return connected_; }
 
-// -- protocol --
+// ---------------------------------------------------------------------------
+// protocol — binary UDP packets with optional AES-128-ECB
+// ---------------------------------------------------------------------------
 
 std::vector<uint8_t> KMBoxNet::build_header(NetCmd cmd, uint32_t data_len) const {
     std::vector<uint8_t> hdr;
@@ -289,8 +288,8 @@ std::vector<uint8_t> KMBoxNet::build_header(NetCmd cmd, uint32_t data_len) const
     return hdr;
 }
 
-std::vector<uint8_t> KMBoxNet::encrypt(const std::vector<uint8_t>& data) const {
-    if (!encryption_enabled_ || data.empty()) return data;
+std::vector<uint8_t> KMBoxNet::encrypt_data(const std::vector<uint8_t>& data) const {
+    if (data.empty()) return data;
 
     size_t padded_len = ((data.size() + 15) / 16) * 16;
     std::vector<uint8_t> padded(padded_len, 0);
@@ -306,9 +305,8 @@ std::vector<uint8_t> KMBoxNet::encrypt(const std::vector<uint8_t>& data) const {
     return out;
 }
 
-std::vector<uint8_t> KMBoxNet::decrypt(const std::vector<uint8_t>& data) const {
-    if (!encryption_enabled_ || data.empty()) return data;
-    if (data.size() % 16 != 0) return data;
+std::vector<uint8_t> KMBoxNet::decrypt_data(const std::vector<uint8_t>& data) const {
+    if (data.empty() || data.size() % 16 != 0) return data;
 
     uint32_t rk[44];
     aes_expand_key(aes_key_.data(), rk);
@@ -320,24 +318,30 @@ std::vector<uint8_t> KMBoxNet::decrypt(const std::vector<uint8_t>& data) const {
     return out;
 }
 
-void KMBoxNet::send_packet(NetCmd cmd, const std::vector<uint8_t>& payload) {
+void KMBoxNet::send_packet(NetCmd cmd, const std::vector<uint8_t>& payload,
+                           bool force_encrypt) {
     require_connected();
-    auto enc_payload = encrypt(payload);
+    bool do_encrypt = force_encrypt || encryption_enabled_;
+    auto enc_payload = do_encrypt ? encrypt_data(payload) : payload;
     auto hdr = build_header(cmd, static_cast<uint32_t>(enc_payload.size()));
     hdr.insert(hdr.end(), enc_payload.begin(), enc_payload.end());
     udp_.send(hdr);
 }
 
 std::vector<uint8_t> KMBoxNet::send_and_receive(NetCmd cmd,
-                                                 const std::vector<uint8_t>& payload) {
-    send_packet(cmd, payload);
+                                                 const std::vector<uint8_t>& payload,
+                                                 bool force_encrypt) {
+    send_packet(cmd, payload, force_encrypt);
     auto resp = udp_.receive_vec(4096, 1000);
     if (resp.size() <= HEADER_SIZE) return {};
     std::vector<uint8_t> body(resp.begin() + HEADER_SIZE, resp.end());
-    return decrypt(body);
+    bool do_encrypt = force_encrypt || encryption_enabled_;
+    return do_encrypt ? decrypt_data(body) : body;
 }
 
-// -- mouse --
+// ---------------------------------------------------------------------------
+// mouse — move(x,y), move_auto(x,y,ms), move_beizer(x,y,ms,cx,cy,cx,cy)
+// ---------------------------------------------------------------------------
 
 void KMBoxNet::mouse_move(int32_t dx, int32_t dy) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -348,38 +352,117 @@ void KMBoxNet::mouse_move(int32_t dx, int32_t dy) {
 }
 
 void KMBoxNet::mouse_move_absolute(int32_t x, int32_t y) {
+    mouse_move(x, y);
+}
+
+void KMBoxNet::mouse_move_smooth(int32_t dx, int32_t dy, uint32_t duration_ms) {
+    move_auto(dx, dy, duration_ms);
+}
+
+void KMBoxNet::move_auto(int32_t x, int32_t y, uint32_t duration_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<uint8_t> data;
     push_i32_le(data, x);
     push_i32_le(data, y);
-    send_packet(NET_CMD_MOUSE_ABS, data);
-}
-
-void KMBoxNet::mouse_move_smooth(int32_t dx, int32_t dy, uint32_t duration_ms) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<uint8_t> data;
-    push_i32_le(data, dx);
-    push_i32_le(data, dy);
     push_u32_le(data, duration_ms);
     send_packet(NET_CMD_MOUSE_AUTO, data);
 }
 
-void KMBoxNet::mouse_press(MouseButton button) {
+void KMBoxNet::move_beizer(int32_t x, int32_t y, uint32_t duration_ms,
+                           int32_t cx1, int32_t cy1, int32_t cx2, int32_t cy2) {
     std::lock_guard<std::mutex> lock(mutex_);
-    current_buttons_ |= static_cast<uint8_t>(button);
     std::vector<uint8_t> data;
-    push_i32_le(data, static_cast<int32_t>(current_buttons_));
-    push_i32_le(data, 1);
-    send_packet(NET_CMD_MOUSE_BTN, data);
+    push_i32_le(data, x);
+    push_i32_le(data, y);
+    push_u32_le(data, duration_ms);
+    push_i32_le(data, cx1);
+    push_i32_le(data, cy1);
+    push_i32_le(data, cx2);
+    push_i32_le(data, cy2);
+    send_packet(NET_CMD_MOUSE_BEIZER, data);
+}
+
+void KMBoxNet::mouse_combined(uint8_t buttons, int32_t x, int32_t y, int32_t wheel) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    data.push_back(buttons);
+    data.push_back(0); data.push_back(0); data.push_back(0);
+    push_i32_le(data, x);
+    push_i32_le(data, y);
+    push_i32_le(data, wheel);
+    send_packet(NET_CMD_MOUSE_ALL, data);
+}
+
+// ---------------------------------------------------------------------------
+// button control — left/right/middle/side1/side2(state)
+// ---------------------------------------------------------------------------
+
+void KMBoxNet::left(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, state);
+    send_packet(NET_CMD_MOUSE_LEFT, data);
+    if (state) current_buttons_ |= 0x01;
+    else       current_buttons_ &= ~0x01;
+}
+
+void KMBoxNet::right(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, state);
+    send_packet(NET_CMD_MOUSE_RIGHT, data);
+    if (state) current_buttons_ |= 0x02;
+    else       current_buttons_ &= ~0x02;
+}
+
+void KMBoxNet::middle(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, state);
+    send_packet(NET_CMD_MOUSE_MIDDLE, data);
+    if (state) current_buttons_ |= 0x04;
+    else       current_buttons_ &= ~0x04;
+}
+
+void KMBoxNet::side1(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, state);
+    send_packet(NET_CMD_MOUSE_SIDE1, data);
+    if (state) current_buttons_ |= 0x08;
+    else       current_buttons_ &= ~0x08;
+}
+
+void KMBoxNet::side2(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, state);
+    send_packet(NET_CMD_MOUSE_SIDE2, data);
+    if (state) current_buttons_ |= 0x10;
+    else       current_buttons_ &= ~0x10;
+}
+
+void KMBoxNet::wheel(int direction) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, direction);
+    send_packet(NET_CMD_MOUSE_WHEEL, data);
+}
+
+void KMBoxNet::mouse_press(MouseButton button) {
+    if (has_flag(button, MouseButton::Left))   left(1);
+    else if (has_flag(button, MouseButton::Right))  right(1);
+    else if (has_flag(button, MouseButton::Middle)) middle(1);
+    else if (has_flag(button, MouseButton::Side1))  side1(1);
+    else if (has_flag(button, MouseButton::Side2))  side2(1);
 }
 
 void KMBoxNet::mouse_release(MouseButton button) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    current_buttons_ &= ~static_cast<uint8_t>(button);
-    std::vector<uint8_t> data;
-    push_i32_le(data, static_cast<int32_t>(current_buttons_));
-    push_i32_le(data, 0);
-    send_packet(NET_CMD_MOUSE_BTN, data);
+    if (has_flag(button, MouseButton::Left))   left(0);
+    else if (has_flag(button, MouseButton::Right))  right(0);
+    else if (has_flag(button, MouseButton::Middle)) middle(0);
+    else if (has_flag(button, MouseButton::Side1))  side1(0);
+    else if (has_flag(button, MouseButton::Side2))  side2(0);
 }
 
 void KMBoxNet::mouse_click(MouseButton button) {
@@ -395,61 +478,67 @@ void KMBoxNet::mouse_double_click(MouseButton button) {
 }
 
 void KMBoxNet::mouse_scroll(int32_t delta) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<uint8_t> data;
-    push_i32_le(data, delta);
-    send_packet(NET_CMD_MOUSE_WHEEL, data);
+    wheel(delta);
 }
 
-// -- keyboard --
+// ---------------------------------------------------------------------------
+// keyboard — keydown(hid_code), keyup(hid_code)
+// ---------------------------------------------------------------------------
+
+void KMBoxNet::keydown(uint8_t hid_code) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_u32_le(data, hid_code);
+    send_packet(NET_CMD_KEYBOARD_DOWN, data);
+}
+
+void KMBoxNet::keyup(uint8_t hid_code) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_u32_le(data, hid_code);
+    send_packet(NET_CMD_KEYBOARD_UP, data);
+}
 
 void KMBoxNet::key_press(KeyCode key, KeyModifier modifiers) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    current_modifier_ |= static_cast<uint8_t>(modifiers);
-
-    uint8_t code = static_cast<uint8_t>(key);
-    for (int i = 0; i < 6; ++i) {
-        if (current_keys_[i] == code) goto send;
+    if (modifiers != KeyModifier::None) {
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftCtrl))   keydown(0xE0);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftShift))  keydown(0xE1);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftAlt))    keydown(0xE2);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftGui))    keydown(0xE3);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightCtrl))  keydown(0xE4);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightShift)) keydown(0xE5);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightAlt))   keydown(0xE6);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightGui))   keydown(0xE7);
     }
-    for (int i = 0; i < 6; ++i) {
-        if (current_keys_[i] == 0) { current_keys_[i] = code; break; }
-    }
-
-send:
-    std::vector<uint8_t> data = {current_modifier_};
-    data.insert(data.end(), current_keys_, current_keys_ + 6);
-    send_packet(NET_CMD_KEYBOARD, data);
+    keydown(static_cast<uint8_t>(key));
 }
 
 void KMBoxNet::key_release(KeyCode key) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    uint8_t code = static_cast<uint8_t>(key);
-    for (int i = 0; i < 6; ++i) {
-        if (current_keys_[i] == code) { current_keys_[i] = 0; break; }
-    }
-    std::vector<uint8_t> data = {current_modifier_};
-    data.insert(data.end(), current_keys_, current_keys_ + 6);
-    send_packet(NET_CMD_KEYBOARD, data);
+    keyup(static_cast<uint8_t>(key));
 }
 
 void KMBoxNet::key_tap(KeyCode key, KeyModifier modifiers) {
     key_press(key, modifiers);
-    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
     key_release(key);
     if (modifiers != KeyModifier::None) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        current_modifier_ &= ~static_cast<uint8_t>(modifiers);
-        std::vector<uint8_t> data = {current_modifier_};
-        data.insert(data.end(), current_keys_, current_keys_ + 6);
-        send_packet(NET_CMD_KEYBOARD, data);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftCtrl))   keyup(0xE0);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftShift))  keyup(0xE1);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftAlt))    keyup(0xE2);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::LeftGui))    keyup(0xE3);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightCtrl))  keyup(0xE4);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightShift)) keyup(0xE5);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightAlt))   keyup(0xE6);
+        if (static_cast<uint8_t>(modifiers & KeyModifier::RightGui))   keyup(0xE7);
     }
 }
 
 void KMBoxNet::key_release_all() {
     std::lock_guard<std::mutex> lock(mutex_);
+    send_packet(NET_CMD_RELEASE_ALL);
+    current_buttons_ = 0;
     current_modifier_ = 0;
     std::memset(current_keys_, 0, sizeof(current_keys_));
-    send_packet(NET_CMD_RELEASE);
 }
 
 void KMBoxNet::type_string(const std::string& text, uint32_t interval_ms) {
@@ -463,7 +552,9 @@ void KMBoxNet::type_string(const std::string& text, uint32_t interval_ms) {
     }
 }
 
-// -- device --
+// ---------------------------------------------------------------------------
+// device management
+// ---------------------------------------------------------------------------
 
 std::string KMBoxNet::device_name() const { return "KMBox Net"; }
 
@@ -485,25 +576,157 @@ DeviceInfo KMBoxNet::get_info() {
 void KMBoxNet::reboot() {
     std::lock_guard<std::mutex> lock(mutex_);
     send_packet(NET_CMD_REBOOT);
+    connected_ = false;
 }
 
-// -- Net-specific --
+// ---------------------------------------------------------------------------
+// KMBox Net specific — encryption
+// ---------------------------------------------------------------------------
 
 void KMBoxNet::set_encryption(bool enabled) {
     encryption_enabled_ = enabled;
 }
 
-void KMBoxNet::set_monitor_resolution(uint16_t width, uint16_t height) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<uint8_t> data;
-    push_u32_le(data, width);
-    push_u32_le(data, height);
-    send_packet(NET_CMD_CONFIG, data);
+bool KMBoxNet::encryption_enabled() const {
+    return encryption_enabled_;
 }
 
-std::vector<uint8_t> KMBoxNet::monitor_capture() {
+// ---------------------------------------------------------------------------
+// monitor — physical input monitoring
+// ---------------------------------------------------------------------------
+
+void KMBoxNet::monitor(int port) {
     std::lock_guard<std::mutex> lock(mutex_);
-    return send_and_receive(NET_CMD_MONITOR);
+    std::vector<uint8_t> data;
+    push_i32_le(data, port);
+    send_packet(NET_CMD_MONITOR, data);
+}
+
+// ---------------------------------------------------------------------------
+// isdown — query physical button state
+// ---------------------------------------------------------------------------
+
+bool KMBoxNet::isdown_left() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_u32_le(data, 0);
+    auto resp = send_and_receive(NET_CMD_ISDOWN, data);
+    return resp.size() >= 4 && read_u32_le(resp.data()) != 0;
+}
+
+bool KMBoxNet::isdown_right() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_u32_le(data, 1);
+    auto resp = send_and_receive(NET_CMD_ISDOWN, data);
+    return resp.size() >= 4 && read_u32_le(resp.data()) != 0;
+}
+
+bool KMBoxNet::isdown_middle() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_u32_le(data, 2);
+    auto resp = send_and_receive(NET_CMD_ISDOWN, data);
+    return resp.size() >= 4 && read_u32_le(resp.data()) != 0;
+}
+
+bool KMBoxNet::isdown_side1() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_u32_le(data, 3);
+    auto resp = send_and_receive(NET_CMD_ISDOWN, data);
+    return resp.size() >= 4 && read_u32_le(resp.data()) != 0;
+}
+
+bool KMBoxNet::isdown_side2() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_u32_le(data, 4);
+    auto resp = send_and_receive(NET_CMD_ISDOWN, data);
+    return resp.size() >= 4 && read_u32_le(resp.data()) != 0;
+}
+
+// ---------------------------------------------------------------------------
+// encrypted variants — force AES regardless of global toggle
+// ---------------------------------------------------------------------------
+
+void KMBoxNet::enc_move(int32_t x, int32_t y) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, x);
+    push_i32_le(data, y);
+    send_packet(NET_CMD_MOUSE_MOVE, data, true);
+}
+
+void KMBoxNet::enc_left(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, state);
+    send_packet(NET_CMD_MOUSE_LEFT, data, true);
+}
+
+void KMBoxNet::enc_right(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, state);
+    send_packet(NET_CMD_MOUSE_RIGHT, data, true);
+}
+
+void KMBoxNet::enc_middle(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, state);
+    send_packet(NET_CMD_MOUSE_MIDDLE, data, true);
+}
+
+void KMBoxNet::enc_side1(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, state);
+    send_packet(NET_CMD_MOUSE_SIDE1, data, true);
+}
+
+void KMBoxNet::enc_side2(int state) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, state);
+    send_packet(NET_CMD_MOUSE_SIDE2, data, true);
+}
+
+void KMBoxNet::enc_wheel(int direction) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, direction);
+    send_packet(NET_CMD_MOUSE_WHEEL, data, true);
+}
+
+// ---------------------------------------------------------------------------
+// mask — mouse and keyboard masking
+// ---------------------------------------------------------------------------
+
+void KMBoxNet::mask_mouse(int32_t x, int32_t y) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_i32_le(data, x);
+    push_i32_le(data, y);
+    send_packet(NET_CMD_MASK_MOUSE, data);
+}
+
+void KMBoxNet::unmask_mouse() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_packet(NET_CMD_UNMASK_MOUSE);
+}
+
+void KMBoxNet::mask_keyboard(uint8_t hid_code) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> data;
+    push_u32_le(data, hid_code);
+    send_packet(NET_CMD_MASK_KB, data);
+}
+
+void KMBoxNet::unmask_keyboard() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_packet(NET_CMD_UNMASK_KB);
 }
 
 } // namespace im

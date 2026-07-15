@@ -30,11 +30,26 @@ int main() {
         mgr.get("makcu").type_string("Hello!", 30);
 
         // typed access for device-specific features
+
+        // KMBox B: monitor, mask, isdown, lcd
+        auto& kb = mgr.get_as<im::KMBoxB>("kb");
+        kb.set_mouse_mask(5, 5);
+        kb.monitor(1);
+        std::cout << "KB left down: " << kb.isdown_left() << "\n";
+        kb.monitor(0);
+        kb.clear_mouse_mask();
+
+        // KMBox Net: bezier move, encrypted calls, monitor
         auto& net = mgr.get_as<im::KMBoxNet>("net");
         net.set_encryption(true);
+        net.move_beizer(200, 100, 500, 50, 100, 150, 50);
+        net.enc_move(10, 10);
 
+        // Makcu: turbo, lock
         auto& makcu = mgr.get_as<im::Makcu>("makcu");
         makcu.turbo(im::MakcuButton::Left, 200);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        makcu.turbo_disable_all();
 
         // move all mice simultaneously
         mgr.mouse_move_all(10, 0);
