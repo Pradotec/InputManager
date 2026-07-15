@@ -31,7 +31,7 @@ public:
                        uint16_t port, const std::string& uuid);
 
     void add_makcu(const std::string& name, const std::string& port,
-                   uint32_t baud_rate = 128000);
+                   uint32_t baud_rate = 115200);
 
     void add_device(const std::string& name, std::unique_ptr<InputDevice> device);
 

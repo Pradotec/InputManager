@@ -65,6 +65,7 @@ struct MakcuDeviceInfo {
 
 class Makcu : public InputDevice {
 public:
+    // CH343 supports up to 4 Mbps — common rates: 115200, 921600, 4000000
     explicit Makcu(const std::string& port, uint32_t baud_rate = 115200);
     ~Makcu() override;
 
@@ -129,6 +130,9 @@ public:
 
     // firmware version string
     std::string firmware_version();
+
+    // change baud rate (common: 115200, 921600, 4000000)
+    void set_baud(uint32_t baud);
 
     // keyboard helpers using key names
     void key_down(const std::string& key_name);

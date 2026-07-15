@@ -439,6 +439,12 @@ std::string Makcu::firmware_version() {
     return send_command("km.version()");
 }
 
+void Makcu::set_baud(uint32_t baud) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    send_command("km.baud(" + std::to_string(baud) + ")");
+    baud_rate_ = baud;
+}
+
 void Makcu::key_down(const std::string& key_name) {
     std::lock_guard<std::mutex> lock(mutex_);
     send_command("km.down('" + key_name + "')");
